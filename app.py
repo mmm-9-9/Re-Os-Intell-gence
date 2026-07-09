@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 
 
-URL = "https://docs.google.com/spreadsheets/d/1zsOjvvXjbLBOr3b2bqtuSDXpea3Sp2Pg0AIgXk-sJic/gviz/tq?tqx=out:csv&sheet=Sayfa1"
+URL = "https://docs.google.com/spreadsheets/d/1zsOjvvXjbLBOr3b2bqtuSDXpea3Sp2Pg0AIgXk-sJic/gviz/tq?tqx=out:csv"
 
 @st.cache_data(ttl=10)
 def load_data():
