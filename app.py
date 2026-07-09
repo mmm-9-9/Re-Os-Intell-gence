@@ -1,51 +1,58 @@
 import streamlit as st
 import pandas as pd
-
-# 1. Google Sheets Linkin
-URL = "https://docs.google.com/spreadsheets/d/1TSj4oPQn6NF4nxQ_0-wogDfAJTvnQo3Uz82Q4zfVnus/gviz/tq?tqx=out:csv"
+import requests
+from io import StringIO
 
 st.set_page_config(page_title="RE-OS Intelligence", layout="wide")
 
-@st.cache_data(ttl=10)
+# Google Sheets'ten veriyi çek
+@st.cache_data(ttl=5)
 def load_data():
-    df = pd.read_csv(URL)
-    # Başlıklardaki olası boşlukları temizle
-    df.columns = df.columns.str.strip()
-    return df
+    URL = "https://docs.google.com/spreadsheets/d/1TSj4oPQn6NF4nxQ_0-wogDfAJTvnQo3Uz82Q4zfVnus/gviz/tq?tqx=out:csv"
+    response = requests.get(url)
+    if response.status_code == 200:
+        df = pd.read_csv(StringIO(response.text))
+        df.columns = df.columns.str.strip()
+        return df
+    return None
 
 st.title("RE-OS Intelligence v1.0")
 
-try:
-    df = load_data()
+df = load_data()
+
+if df is None:
+    st.error("Sistem bağlantısı hatası.")
+else:
+    # Key Giriş Ekranı
+    st.write("### Üyelik Erişimi")
+    key_input = st.text_input("Lütfen size verilen Key'i girin:", type="password")
     
-    # Giriş Ekranı
-    code = st.text_input("Erişim Kodunu Gir:", type="password")
-    
-    if code:
-        code = code.strip()
-        # Kod sütununu stringe çevir ve boşlukları temizle
-        match = df[df['Kod'].astype(str).str.strip() == code]
+    if key_input:
+        key_clean = key_input.strip()
+        match = df[df['Kod'].astype(str).str.strip() == key_clean]
         
         if not match.empty:
             user_info = match.iloc[0]
-            st.success(f"Hoş geldin, {user_info['MusteriAdi']}!")
-            st.write(f"Paketin: {user_info['PaketTuru']}")
             
-            # Admin Paneli İşlevleri
-            if code == 'Mertnine9':
+            # --- ADMIN PANELİ (Sadece Mert) ---
+            if key_clean == 'Mertnine9':
                 st.divider()
-                st.subheader("🛠 Admin Paneli")
-                st.write("Sistem durumu: ✅ Online.")
-                
-                # Müşteri Listesini Göster
-                st.subheader("📋 Tüm Müşteriler")
+                st.subheader("🛠 YÖNETİM MERKEZİ")
                 st.dataframe(df, use_container_width=True)
-                
-                # Basit İstatistik
-                st.metric("Toplam Müşteri Sayısı", len(df))
-        else:
-            st.error("Kod hatalı. Lütfen tekrar dene.")
+                st.success("Admin girişi başarılı.")
             
-except Exception as e:
-    st.error(f"Sistem hatası: {e}. Lütfen Sheets paylaşım ayarlarını kontrol et.")
+            # --- MÜŞTERİ PANELİ (Key'i olanlar) ---
+            else:
+                st.success(f"Erişim sağlandı! Hoş geldin: {user_info['MusteriAdi']}")
+                st.info(f"Üyelik Paketi: **{user_info['PaketTuru']}**")
+                
+                st.divider()
+                st.write("### 🚀 RE-OS Hizmet Paneli")
+                st.write("Üyeliğiniz aktif, hizmeti kullanmaya başlayabilirsiniz.")
+                
+                if st.button("Hizmeti Başlat"):
+                    st.balloons()
+                    st.success("Hizmetiniz başlatıldı ve sınırsız erişim tanımlandı!")
+        else:
+            st.error("Geçersiz Key! Lütfen kodunuzu kontrol edin.")
 
