@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 
 
-URL = https://docs.google.com/spreadsheets/d/18O2AD3vtLwW8VIld8xKy04ANKIar0qvPMY_AEA23-4U/edit?usp=sharing
+URL = "https://docs.google.com/spreadsheets/d/1TSj4oPQn6NF4nxQ_O-wogDFmJTvnQo3Uz82Q4zfVNus/gviz/tq?tqx=out:csv"
+
 
 @st.cache_data(ttl=10)
 def load_data():
