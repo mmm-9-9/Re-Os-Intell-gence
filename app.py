@@ -8,7 +8,7 @@ st.set_page_config(page_title="RE-OS Intelligence", layout="wide")
 # Google Sheets'ten veriyi çek
 @st.cache_data(ttl=5)
 def load_data():
-    URL = "https://docs.google.com/spreadsheets/d/1TSj4oPQn6NF4nxQ_0-wogDfAJTvnQo3Uz82Q4zfVnus/gviz/tq?tqx=out:csv"
+    url = "https://docs.google.com/spreadsheets/d/1TSj4oPQn6NF4nxQ_0-wogDfAJTvnQo3Uz82Q4zfVnus/gviz/tq?tqx=out:csv"
     response = requests.get(url)
     if response.status_code == 200:
         df = pd.read_csv(StringIO(response.text))
