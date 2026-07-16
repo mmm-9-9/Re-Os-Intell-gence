@@ -1,60 +1,53 @@
 import streamlit as st
+import google.generativeai as genai
 import pandas as pd
 
-# Sayfa ayarları
-st.set_page_config(page_title="ReOs", layout="wide")
+# API Ayarı
+genai.configure(api_key="AQ.Ab8RN6IzkRQSlIeIjOyu9xWrmguuOky4-wam_TtIwawF0UvkYg")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Veri yapısı
+st.set_page_config(page_title="ReOs Intelligence", layout="wide")
+
+# Kullanıcı Veritabanı
 def get_user_data():
-    data = {
+    return pd.DataFrame({
         'Kod': ['Mertnine9', 'BASSGOD'],
         'MusteriAdi': ['Mert Şanlı', 'Che'],
         'PaketTuru': ['Admin', 'Pro']
-    }
-    return pd.DataFrame(data)
+    })
 
-# Oturum yönetimi
+# Oturum Yönetimi
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
-    st.session_state.user = None
 
-def login():
-    st.title("🔐 Giriş Ekranı")
+# Giriş Ekranı
+if not st.session_state.logged_in:
+    st.title("🔐 ReOs Giriş")
     pw = st.text_input("Şifrenizi girin:", type="password")
     if st.button("Giriş Yap"):
         df = get_user_data()
-        match = df[df['Kod'].astype(str).str.strip() == pw.strip()]
+        match = df[df['Kod'] == pw.strip()]
         if not match.empty:
             st.session_state.logged_in = True
             st.session_state.user = match.iloc[0]
             st.rerun()
         else:
             st.error("Hatalı şifre!")
-
-# Ana Arayüz
-if not st.session_state.logged_in:
-    login()
 else:
-    # Yan Menü (Sidebar)
+    # Yan Menü
     with st.sidebar:
         st.header(f"👤 {st.session_state.user['MusteriAdi']}")
         st.write(f"Paket: {st.session_state.user['PaketTuru']}")
-        st.divider()
         if st.button("Çıkış Yap"):
             st.session_state.logged_in = False
             st.rerun()
-        
-        # Admin Paneli erişimi
         if st.session_state.user['Kod'] == 'Mertnine9':
-            st.divider()
             if st.checkbox("Admin Panelini Göster"):
                 st.dataframe(get_user_data())
 
     # Ana Ekran
     st.markdown("# RE-OS KİŞİSEL ASİSTANINIZ")
-    st.write(f"Hoş geldin, {st.session_state.user['MusteriAdi']}. ReOs hazır, seni dinliyorum.")
     
-    # Sohbet (Chat) Arayüzü
     if 'messages' not in st.session_state:
         st.session_state.messages = []
 
@@ -67,9 +60,10 @@ else:
         with st.chat_message("user"):
             st.markdown(prompt)
             
-        # ReOs Cevabı
-        response = f"ReOs olarak mesajını aldım: '{prompt}'. Sınırsız hizmet modunda işliyorum."
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        # ReOs Uzman Cevabı
         with st.chat_message("assistant"):
-            st.markdown(response)
+            full_prompt = f"Sen ReOs adında uzman bir asistansın. Mert ve Che için çalışıyorsun. Profesyonel, yardımsever ve çözüm odaklısın. Kullanıcı mesajı: {prompt}"
+            response = model.generate_content(full_prompt)
+            st.markdown(response.text)
+            st.session_state.messages.append({"role": "assistant", "content": response.text})
 
