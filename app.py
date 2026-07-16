@@ -1,11 +1,10 @@
 import streamlit as st
 import google.generativeai as genai
 import pandas as pd
-import os
 
-# API anahtarını doğrudan kodun içine gömmüyoruz, Render'dan çekecek
-api_key = os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=api_key)
+# Anahtarı direkt buraya tanımlıyorum, başka hiçbir yere dokunmana gerek yok.
+API_KEY = "AQ.Ab8RN6IzkRQSlIeIjOyu9xWrmguuOky4-wam_TtIwawF0UvkYg"
+genai.configure(api_key=API_KEY)
 
 model = genai.GenerativeModel("gemini-1.5-flash")
 
@@ -60,10 +59,11 @@ else:
             
         with st.chat_message("assistant"):
             try:
-                full_prompt = f"Sen ReOs adında uzman bir asistansın. Mert ve Che için çalışıyorsun. Profesyonel, yardımsever ve çözüm odaklısın. Kullanıcı: {prompt}"
-                response = model.generate_content(full_prompt)
+                # Modeli burada doğrudan API_KEY ile yapılandırıyoruz
+                chat_model = genai.GenerativeModel("gemini-1.5-flash")
+                response = chat_model.generate_content(f"Sen ReOs adında uzman bir asistansın. Mert ve Che için çalışıyorsun. Kullanıcı: {prompt}")
                 st.markdown(response.text)
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
             except Exception as e:
-                st.error(f"ReOs şu an teknik bir aksaklık yaşıyor: {e}")
+                st.error(f"Hata: {e}")
 
