@@ -3,11 +3,10 @@ import google.generativeai as genai
 import pandas as pd
 import os
 
-# API anahtarını doğrudan environment değişkeni olarak tanımlıyoruz ki kütüphane kaçamasın
-os.environ["GOOGLE_API_KEY"] = "AQ.Ab8RN6KXU8FJ1vMqjS_se8G0-zoUmUrxzKsX6P4w1slrbVP0gw"
-genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+# API anahtarını doğrudan kodun içine gömmüyoruz, Render'dan çekecek
+api_key = os.getenv("GOOGLE_API_KEY")
+genai.configure(api_key=api_key)
 
-# Modeli güncelliyoruz
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 st.set_page_config(page_title="ReOs Intelligence", layout="wide")
@@ -61,7 +60,6 @@ else:
             
         with st.chat_message("assistant"):
             try:
-                # Modeli çağırırken daha spesifik bir talimat veriyoruz
                 full_prompt = f"Sen ReOs adında uzman bir asistansın. Mert ve Che için çalışıyorsun. Profesyonel, yardımsever ve çözüm odaklısın. Kullanıcı: {prompt}"
                 response = model.generate_content(full_prompt)
                 st.markdown(response.text)
