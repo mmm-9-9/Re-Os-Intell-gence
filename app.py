@@ -1,5 +1,8 @@
 import os
+import re
 import sqlite3
+import secrets
+import hashlib
 import datetime
 import requests
 import streamlit as st
@@ -17,15 +20,29 @@ client = genai.Client(api_key=API_KEY)
 MODEL_NAME = "gemini-3.5-flash"
 DB_PATH = "reos_data.db"
 
+# Bu email ile kayıt olan kişi otomatik Admin olur. Render'da ADMIN_EMAIL
+# ortam değişkeni olarak kendi mailini ekle.
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+
 st.set_page_config(page_title="ReOs Intelligence", layout="wide")
 
 
 # ============ VERİTABANI ============
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE NOT NULL,
+        ad_soyad TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        paket TEXT NOT NULL DEFAULT 'Ücretsiz',
+        is_admin INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS conversations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_kod TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
         title TEXT NOT NULL,
         created_at TEXT NOT NULL
     )""")
@@ -37,18 +54,76 @@ def get_conn():
         ts TEXT NOT NULL
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS user_settings (
-        user_kod TEXT PRIMARY KEY,
+        user_id INTEGER PRIMARY KEY,
         custom_instructions TEXT
     )""")
     conn.commit()
     return conn
 
 
-def create_conversation(user_kod, title):
+# ============ ŞİFRE GÜVENLİĞİ ============
+def hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets.token_hex(16)
+    pwd_hash = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100_000).hex()
+    return pwd_hash, salt
+
+
+def verify_password(password, salt, stored_hash):
+    check_hash, _ = hash_password(password, salt)
+    return secrets.compare_digest(check_hash, stored_hash)
+
+
+# ============ KULLANICI İŞLEMLERİ ============
+def email_valid(email):
+    return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) is not None
+
+
+def get_user_by_email(email):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id, email, ad_soyad, password_hash, salt, paket, is_admin FROM users WHERE email = ?",
+        (email.strip().lower(),)
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def create_user(email, ad_soyad, password):
+    email = email.strip().lower()
+    pwd_hash, salt = hash_password(password)
+    is_admin = 1 if (ADMIN_EMAIL and email == ADMIN_EMAIL) else 0
+    paket = "Admin" if is_admin else "Ücretsiz"
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO users (email, ad_soyad, password_hash, salt, paket, is_admin, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (email, ad_soyad, pwd_hash, salt, paket, is_admin, datetime.datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_users():
+    conn = get_conn()
+    rows = conn.execute("SELECT id, email, ad_soyad, paket, created_at FROM users ORDER BY id").fetchall()
+    conn.close()
+    return rows
+
+
+def update_user_package(user_id, paket):
+    conn = get_conn()
+    conn.execute("UPDATE users SET paket = ? WHERE id = ?", (paket, user_id))
+    conn.commit()
+    conn.close()
+
+
+# ============ SOHBET VERİTABANI ============
+def create_conversation(user_id, title):
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO conversations (user_kod, title, created_at) VALUES (?, ?, ?)",
-        (user_kod, title, datetime.datetime.now().isoformat())
+        "INSERT INTO conversations (user_id, title, created_at) VALUES (?, ?, ?)",
+        (user_id, title, datetime.datetime.now().isoformat())
     )
     conn.commit()
     conv_id = cur.lastrowid
@@ -56,11 +131,11 @@ def create_conversation(user_kod, title):
     return conv_id
 
 
-def get_conversations(user_kod):
+def get_conversations(user_id):
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, title FROM conversations WHERE user_kod = ? ORDER BY id DESC",
-        (user_kod,)
+        "SELECT id, title FROM conversations WHERE user_id = ? ORDER BY id DESC",
+        (user_id,)
     ).fetchall()
     conn.close()
     return rows
@@ -93,27 +168,27 @@ def get_messages(conv_id):
     return [{"role": r, "content": c} for r, c in rows]
 
 
-def get_custom_instructions(user_kod):
+def get_custom_instructions(user_id):
     conn = get_conn()
     row = conn.execute(
-        "SELECT custom_instructions FROM user_settings WHERE user_kod = ?", (user_kod,)
+        "SELECT custom_instructions FROM user_settings WHERE user_id = ?", (user_id,)
     ).fetchone()
     conn.close()
-    return row[0] if row else ""
+    return row[0] if row and row[0] else ""
 
 
-def set_custom_instructions(user_kod, text):
+def set_custom_instructions(user_id, text):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO user_settings (user_kod, custom_instructions) VALUES (?, ?) "
-        "ON CONFLICT(user_kod) DO UPDATE SET custom_instructions = excluded.custom_instructions",
-        (user_kod, text)
+        "INSERT INTO user_settings (user_id, custom_instructions) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET custom_instructions = excluded.custom_instructions",
+        (user_id, text)
     )
     conn.commit()
     conn.close()
 
 
-# ============ YARDIMCI FONKSİYONLAR ============
+# ============ ASİSTAN YARDIMCILARI ============
 def get_bursa_weather():
     try:
         r = requests.get(
@@ -136,7 +211,9 @@ def get_bursa_weather():
 def build_system_prompt(custom_instructions):
     now = datetime.datetime.now()
     gunler = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
-    tarih_str = f"{now.day} {['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'][now.month-1]} {now.year}, {gunler[now.weekday()]}"
+    aylar = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz",
+             "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+    tarih_str = f"{now.day} {aylar[now.month-1]} {now.year}, {gunler[now.weekday()]}"
     hava = get_bursa_weather()
 
     prompt = (
@@ -158,44 +235,62 @@ def build_gemini_contents(messages):
     return contents
 
 
-def get_user_data():
-    return pd.DataFrame({
-        'Kod': ['Mertnine9', 'BASSGOD'],
-        'MusteriAdi': ['Mert Şanlı', 'Che'],
-        'PaketTuru': ['Admin', 'Pro']
-    })
-
-
-# ============ GİRİŞ ============
+# ============ GİRİŞ / KAYIT ============
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
 if not st.session_state.logged_in:
-    st.title("🔐 ReOs Giriş")
-    pw = st.text_input("Şifrenizi girin:", type="password")
-    if st.button("Giriş Yap"):
-        df = get_user_data()
-        match = df[df['Kod'] == pw.strip()]
-        if not match.empty:
-            st.session_state.logged_in = True
-            st.session_state.user = match.iloc[0]
-            st.session_state.active_conv_id = None
-            st.rerun()
-        else:
-            st.error("Hatalı şifre!")
+    st.title("🔐 ReOs")
+    tab_giris, tab_kayit = st.tabs(["Giriş Yap", "Kayıt Ol"])
+
+    with tab_giris:
+        email = st.text_input("Email", key="login_email")
+        pw = st.text_input("Şifre", type="password", key="login_pw")
+        if st.button("Giriş Yap"):
+            user = get_user_by_email(email)
+            if user and verify_password(pw, user[4], user[3]):
+                st.session_state.logged_in = True
+                st.session_state.user = {
+                    "id": user[0], "email": user[1], "ad_soyad": user[2],
+                    "paket": user[5], "is_admin": bool(user[6]),
+                }
+                st.session_state.active_conv_id = None
+                st.rerun()
+            else:
+                st.error("Email veya şifre hatalı.")
+
+    with tab_kayit:
+        yeni_ad = st.text_input("Ad Soyad", key="reg_ad")
+        yeni_email = st.text_input("Email", key="reg_email")
+        yeni_pw = st.text_input("Şifre", type="password", key="reg_pw")
+        yeni_pw2 = st.text_input("Şifre (tekrar)", type="password", key="reg_pw2")
+        if st.button("Kayıt Ol"):
+            if not yeni_ad.strip():
+                st.error("Ad soyad giriniz.")
+            elif not email_valid(yeni_email):
+                st.error("Geçerli bir email giriniz.")
+            elif len(yeni_pw) < 6:
+                st.error("Şifre en az 6 karakter olmalı.")
+            elif yeni_pw != yeni_pw2:
+                st.error("Şifreler eşleşmiyor.")
+            elif get_user_by_email(yeni_email):
+                st.error("Bu email zaten kayıtlı.")
+            else:
+                create_user(yeni_email, yeni_ad.strip(), yeni_pw)
+                st.success("Kayıt başarılı! Şimdi 'Giriş Yap' sekmesinden giriş yapabilirsiniz.")
 
 else:
-    user_kod = st.session_state.user['Kod']
-    user_name = st.session_state.user['MusteriAdi']
-    package = st.session_state.user['PaketTuru']
+    user_id = st.session_state.user["id"]
+    user_name = st.session_state.user["ad_soyad"]
+    package = st.session_state.user["paket"]
+    is_admin = st.session_state.user["is_admin"]
 
-    # Aktif sohbet yoksa, en son sohbeti yükle ya da yeni oluştur
     if st.session_state.get('active_conv_id') is None:
-        existing = get_conversations(user_kod)
+        existing = get_conversations(user_id)
         if existing:
             st.session_state.active_conv_id = existing[0][0]
         else:
-            st.session_state.active_conv_id = create_conversation(user_kod, "Yeni Sohbet")
+            st.session_state.active_conv_id = create_conversation(user_id, "Yeni Sohbet")
 
     with st.sidebar:
         st.header(f"👤 {user_name}")
@@ -207,34 +302,44 @@ else:
 
         st.divider()
         if st.button("➕ Yeni Sohbet"):
-            st.session_state.active_conv_id = create_conversation(user_kod, "Yeni Sohbet")
+            st.session_state.active_conv_id = create_conversation(user_id, "Yeni Sohbet")
             st.rerun()
 
         st.subheader("🕘 Geçmiş Sohbetler")
-        for conv_id, title in get_conversations(user_kod):
+        for conv_id, title in get_conversations(user_id):
             label = title if conv_id != st.session_state.active_conv_id else f"➡️ {title}"
             if st.button(label, key=f"conv_{conv_id}"):
                 st.session_state.active_conv_id = conv_id
                 st.rerun()
 
-        if package == "Pro":
+        if package == "Pro" or is_admin:
             st.divider()
             st.subheader("⚙️ Özelleştirme")
-            current_instr = get_custom_instructions(user_kod)
+            current_instr = get_custom_instructions(user_id)
             new_instr = st.text_area(
                 "Asistan senin için nasıl davransın?",
-                value=current_instr,
-                height=150,
-                key="custom_instr_box",
+                value=current_instr, height=150, key="custom_instr_box",
             )
             if st.button("Kaydet", key="save_instr"):
-                set_custom_instructions(user_kod, new_instr)
+                set_custom_instructions(user_id, new_instr)
                 st.success("Kaydedildi.")
 
-        if user_kod == 'Mertnine9':
+        if is_admin:
             st.divider()
             if st.checkbox("Admin Panelini Göster"):
-                st.dataframe(get_user_data())
+                users = get_all_users()
+                st.write("### Kullanıcılar")
+                for uid, uemail, uad, upaket, ucreated in users:
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    col1.write(f"{uad} ({uemail})")
+                    new_paket = col2.selectbox(
+                        "Paket", ["Ücretsiz", "Pro", "Admin"],
+                        index=["Ücretsiz", "Pro", "Admin"].index(upaket) if upaket in ["Ücretsiz", "Pro", "Admin"] else 0,
+                        key=f"paket_{uid}", label_visibility="collapsed",
+                    )
+                    if col3.button("Güncelle", key=f"update_{uid}"):
+                        update_user_package(uid, new_paket)
+                        st.rerun()
 
     st.markdown("# RE-OS KİŞİSEL ASİSTANINIZ")
 
@@ -258,7 +363,7 @@ else:
 
         with st.chat_message("assistant"):
             try:
-                custom_instructions = get_custom_instructions(user_kod) if package == "Pro" else ""
+                custom_instructions = get_custom_instructions(user_id) if (package == "Pro" or is_admin) else ""
                 system_prompt = build_system_prompt(custom_instructions)
                 all_messages = get_messages(active_conv_id)
                 contents = build_gemini_contents(all_messages)
