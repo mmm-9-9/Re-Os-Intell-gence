@@ -22,7 +22,7 @@ DB_PATH = "reos_data.db"
 
 # Bu email ile kayıt olan kişi otomatik Admin olur. Render'da ADMIN_EMAIL
 # ortam değişkeni olarak kendi mailini ekle.
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL"merts5297@gmail.com"").strip().lower()
 
 st.set_page_config(page_title="ReOs Intelligence", layout="wide")
 
