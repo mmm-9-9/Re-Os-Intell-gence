@@ -1,21 +1,20 @@
 import os
 import streamlit as st
-from google import genai
+import anthropic
 import pandas as pd
 
-# API anahtarÄ±nÄ± artÄ±k ortam deÄŸiÅŸkeninden okuyoruz.
-# Render'da: Dashboard > Environment > Environment Variables > GEMINI_API_KEY ekle.
-# Lokalde denemek iÃ§in: terminalde `export GEMINI_API_KEY="senin-anahtarin"` Ã§alÄ±ÅŸtÄ±r
-# ya da aÅŸaÄŸÄ±daki satÄ±rÄ± geÃ§ici olarak aÃ§Ä±p anahtarÄ±nÄ± gir (deploy etmeden Ã¶nce SÄ°L).
-API_KEY = os.environ.get("GEMINI_API_KEY")
-# API_KEY = "buraya-lokal-test-icin-gecici-anahtar"
+# API anahtarÄ±nÄ± ortam deÄŸiÅŸkeninden okuyoruz.
+# Render'da: Dashboard > Environment > Environment Variables > ANTHROPIC_API_KEY ekle.
+# AnahtarÄ± buradan alabilirsin: https://console.anthropic.com/settings/keys
+# GerÃ§ek anahtar "sk-ant-..." ile baÅŸlar.
+API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 if not API_KEY:
-    st.error("GEMINI_API_KEY ortam deÄŸiÅŸkeni bulunamadÄ±. Render > Environment kÄ±smÄ±ndan ekleyin.")
+    st.error("ANTHROPIC_API_KEY ortam deÄŸiÅŸkeni bulunamadÄ±. Render > Environment kÄ±smÄ±ndan ekleyin.")
     st.stop()
 
-client = genai.Client(api_key=API_KEY)
-MODEL_NAME = "gemini-3.5-flash"  # gemini-1.5-flash artÄ±k kapatÄ±ldÄ±, yeni model bu
+client = anthropic.Anthropic(api_key=API_KEY)
+MODEL_NAME = "claude-sonnet-5"  # ihtiyaca gÃ¶re "claude-haiku-4-5-20251001" (daha ucuz/hÄ±zlÄ±) da kullanÄ±labilir
 
 st.set_page_config(page_title="ReOs Intelligence", layout="wide")
 
@@ -70,11 +69,24 @@ else:
 
         with st.chat_message("assistant"):
             try:
-                response = client.models.generate_content(
+                # Ã–nceki mesajlarÄ± da API'ye gÃ¶nderiyoruz ki asistan konuÅŸma geÃ§miÅŸini hatÄ±rlasÄ±n
+                api_messages = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.messages
+                ]
+                response = client.messages.create(
                     model=MODEL_NAME,
-                    contents=f"Sen ReOs adÄ±nda uzman bir asistansÄ±n. Mert ve Che iÃ§in Ã§alÄ±ÅŸÄ±yorsun. KullanÄ±cÄ±: {prompt}"
+                    max_tokens=1024,
+                    system=(
+                        "Sen ReOs adÄ±nda uzman bir kiÅŸisel asistansÄ±n. "
+                        "Mert ve Che iÃ§in Ã§alÄ±ÅŸÄ±yorsun. Birden fazla konuda "
+                        "(iÅŸ takibi, planlama, genel danÄ±ÅŸmanlÄ±k vb.) yardÄ±mcÄ± olabilirsin. "
+                        "Net, kÄ±sa ve faydalÄ± cevaplar ver."
+                    ),
+                    messages=api_messages,
                 )
-                st.markdown(response.text)
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
+                answer = response.content[0].text
+                st.markdown(answer)
+                st.session_state.messages.append({"role": "assistant", "content": answer})
             except Exception as e:
                 st.error(f"Hata: {e}")
