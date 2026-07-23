@@ -78,6 +78,10 @@ def init_db():
         user_id INTEGER PRIMARY KEY,
         custom_instructions TEXT
     )""")
+    run("""CREATE TABLE IF NOT EXISTS user_memory (
+        user_id INTEGER PRIMARY KEY,
+        notes TEXT
+    )""")
 
 
 init_db()
@@ -146,6 +150,18 @@ def rename_conversation(conv_id, title):
     run("UPDATE conversations SET title = %s WHERE id = %s", (title, conv_id))
 
 
+def delete_conversation(conv_id):
+    run("DELETE FROM messages WHERE conversation_id = %s", (conv_id,))
+    run("DELETE FROM conversations WHERE id = %s", (conv_id,))
+
+
+def delete_all_conversations(user_id):
+    conv_ids = run("SELECT id FROM conversations WHERE user_id = %s", (user_id,), fetch=True)
+    for (conv_id,) in conv_ids:
+        run("DELETE FROM messages WHERE conversation_id = %s", (conv_id,))
+    run("DELETE FROM conversations WHERE user_id = %s", (user_id,))
+
+
 def add_message(conv_id, role, content):
     run(
         "INSERT INTO messages (conversation_id, role, content, ts) VALUES (%s, %s, %s, %s)",
@@ -169,6 +185,43 @@ def set_custom_instructions(user_id, text):
         "ON CONFLICT (user_id) DO UPDATE SET custom_instructions = EXCLUDED.custom_instructions",
         (user_id, text)
     )
+
+
+# ============ KALICI HAFIZA (sohbetler arası hatırlama) ============
+def get_memory(user_id):
+    rows = run("SELECT notes FROM user_memory WHERE user_id = %s", (user_id,), fetch=True)
+    return rows[0][0] if rows and rows[0][0] else ""
+
+
+def save_memory(user_id, notes):
+    run(
+        "INSERT INTO user_memory (user_id, notes) VALUES (%s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET notes = EXCLUDED.notes",
+        (user_id, notes)
+    )
+
+
+def update_memory_from_exchange(user_id, user_msg, assistant_msg):
+    """Konuşmadan kalıcı, durable bilgi çıkarıp hafızaya ekler. Hata olursa sohbeti bozmasın diye sessizce geçer."""
+    try:
+        existing = get_memory(user_id)
+        extraction_prompt = (
+            "Aşağıda bir kullanıcının asistanla yaptığı mesaj alışverişi var. "
+            "Görevin: kullanıcı hakkında GELECEKTE de geçerli olacak, kalıcı bilgileri "
+            "(iş, tercihler, tekrar eden konular, isimler, hedefler vb.) çıkarıp mevcut "
+            "notlara eklemek/güncellemek. Geçici, o ana özel bilgileri (bugün ne sordu gibi) EKLEME. "
+            "Sadece kısa madde işaretli bir liste döndür, başka hiçbir açıklama yazma. "
+            "Eğer bu alışverişte kalıcı bir bilgi yoksa, mevcut notları olduğu gibi döndür.\n\n"
+            f"MEVCUT NOTLAR:\n{existing if existing else '(henüz not yok)'}\n\n"
+            f"YENİ MESAJ:\nKullanıcı: {user_msg}\nAsistan: {assistant_msg}\n\n"
+            "GÜNCELLENMİŞ NOTLAR:"
+        )
+        response = client.models.generate_content(model=MODEL_NAME, contents=extraction_prompt)
+        new_notes = response.text.strip()
+        if new_notes:
+            save_memory(user_id, new_notes)
+    except Exception:
+        pass
 
 
 # ============ ASİSTAN YARDIMCILARI ============
@@ -196,7 +249,7 @@ def get_weather_for_city(sehir):
         return "Hava durumu bilgisi şu an alınamadı."
 
 
-def build_system_prompt(custom_instructions, sehir):
+def build_system_prompt(custom_instructions, sehir, memory_notes=""):
     now = datetime.datetime.now()
     gunler = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
     aylar = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz",
@@ -209,6 +262,8 @@ def build_system_prompt(custom_instructions, sehir):
         f"Bugünün tarihi: {tarih_str}.\n"
         f"Güncel hava durumu: {hava}\n"
     )
+    if memory_notes and memory_notes.strip():
+        prompt += f"\nBu kullanıcı hakkında önceki sohbetlerden hatırladığın bilgiler:\n{memory_notes.strip()}\n"
     if custom_instructions and custom_instructions.strip():
         prompt += f"\nKullanıcının senin için verdiği özel talimatlar:\n{custom_instructions.strip()}\n"
     return prompt
@@ -296,10 +351,23 @@ else:
             st.rerun()
 
         st.subheader("🕘 Geçmiş Sohbetler")
-        for conv_id, title in get_conversations(user_id):
+        conv_list = get_conversations(user_id)
+        for conv_id, title in conv_list:
             label = title if conv_id != st.session_state.active_conv_id else f"➡️ {title}"
-            if st.button(label, key=f"conv_{conv_id}"):
+            col_a, col_b = st.columns([4, 1])
+            if col_a.button(label, key=f"conv_{conv_id}"):
                 st.session_state.active_conv_id = conv_id
+                st.rerun()
+            if col_b.button("🗑️", key=f"del_{conv_id}"):
+                delete_conversation(conv_id)
+                if st.session_state.active_conv_id == conv_id:
+                    st.session_state.active_conv_id = None
+                st.rerun()
+
+        if len(conv_list) > 1:
+            if st.button("🗑️ Tüm Sohbetleri Sil"):
+                delete_all_conversations(user_id)
+                st.session_state.active_conv_id = None
                 st.rerun()
 
         if package == "Pro" or is_admin:
@@ -354,7 +422,8 @@ else:
         with st.chat_message("assistant"):
             try:
                 custom_instructions = get_custom_instructions(user_id) if (package == "Pro" or is_admin) else ""
-                system_prompt = build_system_prompt(custom_instructions, st.session_state.user["sehir"])
+                memory_notes = get_memory(user_id)
+                system_prompt = build_system_prompt(custom_instructions, st.session_state.user["sehir"], memory_notes)
                 all_messages = get_messages(active_conv_id)
                 contents = build_gemini_contents(all_messages)
 
@@ -366,5 +435,6 @@ else:
                 answer = response.text
                 st.markdown(answer)
                 add_message(active_conv_id, "assistant", answer)
+                update_memory_from_exchange(user_id, prompt, answer)
             except Exception as e:
                 st.error(f"Hata: {e}")
