@@ -1,10 +1,10 @@
 import os
 import re
-import sqlite3
 import secrets
 import hashlib
 import datetime
 import requests
+import psycopg2
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -16,49 +16,71 @@ if not API_KEY:
     st.error("GEMINI_API_KEY ortam değişkeni bulunamadı. Render > Environment kısmından ekleyin.")
     st.stop()
 
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    st.error("DATABASE_URL ortam değişkeni bulunamadı. Render > Environment kısmından ekleyin.")
+    st.stop()
+
 client = genai.Client(api_key=API_KEY)
 MODEL_NAME = "gemini-3.5-flash"
-DB_PATH = "reos_data.db"
 
-# Bu email ile kayıt olan kişi otomatik Admin olur. Render'da ADMIN_EMAIL
-# ortam değişkeni olarak kendi mailini ekle.
-ADMIN_EMAIL = "merts5297@gmail.com".strip().lower()
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
 
 st.set_page_config(page_title="ReOs Intelligence", layout="wide")
 
 
-# ============ VERİTABANI ============
+# ============ VERİTABANI (Postgres / Supabase) ============
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    return psycopg2.connect(DATABASE_URL)
+
+
+def run(sql, params=None, fetch=False, returning=False):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(sql, params or ())
+    result = None
+    if fetch:
+        result = cur.fetchall()
+    elif returning:
+        result = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return result
+
+
+def init_db():
+    run("""CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
         email TEXT UNIQUE NOT NULL,
         ad_soyad TEXT NOT NULL,
         password_hash TEXT NOT NULL,
         salt TEXT NOT NULL,
         paket TEXT NOT NULL DEFAULT 'Ücretsiz',
         is_admin INTEGER NOT NULL DEFAULT 0,
+        sehir TEXT NOT NULL DEFAULT 'Bursa',
         created_at TEXT NOT NULL
     )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS conversations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run("""CREATE TABLE IF NOT EXISTS conversations (
+        id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL,
         title TEXT NOT NULL,
         created_at TEXT NOT NULL
     )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run("""CREATE TABLE IF NOT EXISTS messages (
+        id SERIAL PRIMARY KEY,
         conversation_id INTEGER NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         ts TEXT NOT NULL
     )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS user_settings (
+    run("""CREATE TABLE IF NOT EXISTS user_settings (
         user_id INTEGER PRIMARY KEY,
         custom_instructions TEXT
     )""")
-    conn.commit()
-    return conn
+
+
+init_db()
 
 
 # ============ ŞİFRE GÜVENLİĞİ ============
@@ -80,142 +102,107 @@ def email_valid(email):
 
 
 def get_user_by_email(email):
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT id, email, ad_soyad, password_hash, salt, paket, is_admin FROM users WHERE email = ?",
-        (email.strip().lower(),)
-    ).fetchone()
-    conn.close()
-    return row
+    rows = run(
+        "SELECT id, email, ad_soyad, password_hash, salt, paket, is_admin, sehir FROM users WHERE email = %s",
+        (email.strip().lower(),), fetch=True
+    )
+    return rows[0] if rows else None
 
 
-def create_user(email, ad_soyad, password):
+def create_user(email, ad_soyad, password, sehir):
     email = email.strip().lower()
     pwd_hash, salt = hash_password(password)
     is_admin = 1 if (ADMIN_EMAIL and email == ADMIN_EMAIL) else 0
     paket = "Admin" if is_admin else "Ücretsiz"
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO users (email, ad_soyad, password_hash, salt, paket, is_admin, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (email, ad_soyad, pwd_hash, salt, paket, is_admin, datetime.datetime.now().isoformat())
+    run(
+        "INSERT INTO users (email, ad_soyad, password_hash, salt, paket, is_admin, sehir, created_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (email, ad_soyad, pwd_hash, salt, paket, is_admin, sehir.strip() or "Bursa", datetime.datetime.now().isoformat())
     )
-    conn.commit()
-    conn.close()
 
 
 def get_all_users():
-    conn = get_conn()
-    rows = conn.execute("SELECT id, email, ad_soyad, paket, created_at FROM users ORDER BY id").fetchall()
-    conn.close()
-    return rows
+    return run("SELECT id, email, ad_soyad, paket, created_at FROM users ORDER BY id", fetch=True)
 
 
 def update_user_package(user_id, paket):
-    conn = get_conn()
-    conn.execute("UPDATE users SET paket = ? WHERE id = ?", (paket, user_id))
-    conn.commit()
-    conn.close()
+    run("UPDATE users SET paket = %s WHERE id = %s", (paket, user_id))
 
 
 # ============ SOHBET VERİTABANI ============
 def create_conversation(user_id, title):
-    conn = get_conn()
-    cur = conn.execute(
-        "INSERT INTO conversations (user_id, title, created_at) VALUES (?, ?, ?)",
-        (user_id, title, datetime.datetime.now().isoformat())
+    row = run(
+        "INSERT INTO conversations (user_id, title, created_at) VALUES (%s, %s, %s) RETURNING id",
+        (user_id, title, datetime.datetime.now().isoformat()), returning=True
     )
-    conn.commit()
-    conv_id = cur.lastrowid
-    conn.close()
-    return conv_id
+    return row[0]
 
 
 def get_conversations(user_id):
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT id, title FROM conversations WHERE user_id = ? ORDER BY id DESC",
-        (user_id,)
-    ).fetchall()
-    conn.close()
-    return rows
+    return run("SELECT id, title FROM conversations WHERE user_id = %s ORDER BY id DESC", (user_id,), fetch=True)
 
 
 def rename_conversation(conv_id, title):
-    conn = get_conn()
-    conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conv_id))
-    conn.commit()
-    conn.close()
+    run("UPDATE conversations SET title = %s WHERE id = %s", (title, conv_id))
 
 
 def add_message(conv_id, role, content):
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO messages (conversation_id, role, content, ts) VALUES (?, ?, ?, ?)",
+    run(
+        "INSERT INTO messages (conversation_id, role, content, ts) VALUES (%s, %s, %s, %s)",
         (conv_id, role, content, datetime.datetime.now().isoformat())
     )
-    conn.commit()
-    conn.close()
 
 
 def get_messages(conv_id):
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id ASC",
-        (conv_id,)
-    ).fetchall()
-    conn.close()
+    rows = run("SELECT role, content FROM messages WHERE conversation_id = %s ORDER BY id ASC", (conv_id,), fetch=True)
     return [{"role": r, "content": c} for r, c in rows]
 
 
 def get_custom_instructions(user_id):
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT custom_instructions FROM user_settings WHERE user_id = ?", (user_id,)
-    ).fetchone()
-    conn.close()
-    return row[0] if row and row[0] else ""
+    rows = run("SELECT custom_instructions FROM user_settings WHERE user_id = %s", (user_id,), fetch=True)
+    return rows[0][0] if rows and rows[0][0] else ""
 
 
 def set_custom_instructions(user_id, text):
-    conn = get_conn()
-    conn.execute(
-        "INSERT INTO user_settings (user_id, custom_instructions) VALUES (?, ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET custom_instructions = excluded.custom_instructions",
+    run(
+        "INSERT INTO user_settings (user_id, custom_instructions) VALUES (%s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET custom_instructions = EXCLUDED.custom_instructions",
         (user_id, text)
     )
-    conn.commit()
-    conn.close()
 
 
 # ============ ASİSTAN YARDIMCILARI ============
-def get_bursa_weather():
+def get_weather_for_city(sehir):
+    sehir = (sehir or "Bursa").strip()
     try:
+        geo = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": sehir, "count": 1, "language": "tr"},
+            timeout=5,
+        ).json()
+        if not geo.get("results"):
+            return f"'{sehir}' için hava durumu bulunamadı."
+        lat = geo["results"][0]["latitude"]
+        lon = geo["results"][0]["longitude"]
         r = requests.get(
             "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": 40.1826,
-                "longitude": 29.0669,
-                "current": "temperature_2m,weather_code",
-                "timezone": "auto",
-            },
+            params={"latitude": lat, "longitude": lon, "current": "temperature_2m,weather_code", "timezone": "auto"},
             timeout=5,
         )
         data = r.json()
         temp = data["current"]["temperature_2m"]
-        return f"Bursa'da şu an hava yaklaşık {temp}°C."
+        return f"{sehir}'da şu an hava yaklaşık {temp}°C."
     except Exception:
         return "Hava durumu bilgisi şu an alınamadı."
 
 
-def build_system_prompt(custom_instructions):
+def build_system_prompt(custom_instructions, sehir):
     now = datetime.datetime.now()
     gunler = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
     aylar = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz",
              "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
     tarih_str = f"{now.day} {aylar[now.month-1]} {now.year}, {gunler[now.weekday()]}"
-    hava = get_bursa_weather()
-
+    hava = get_weather_for_city(sehir)
     prompt = (
         "Sen ReOs adında, kullanıcıya yardımcı olan uzman bir kişisel asistansın. "
         "Net, kısa ve faydalı cevaplar ver.\n\n"
@@ -252,7 +239,7 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.user = {
                     "id": user[0], "email": user[1], "ad_soyad": user[2],
-                    "paket": user[5], "is_admin": bool(user[6]),
+                    "paket": user[5], "is_admin": bool(user[6]), "sehir": user[7],
                 }
                 st.session_state.active_conv_id = None
                 st.rerun()
@@ -262,6 +249,7 @@ if not st.session_state.logged_in:
     with tab_kayit:
         yeni_ad = st.text_input("Ad Soyad", key="reg_ad")
         yeni_email = st.text_input("Email", key="reg_email")
+        yeni_sehir = st.text_input("Yaşadığınız şehir", key="reg_sehir", placeholder="Örn: Bursa")
         yeni_pw = st.text_input("Şifre", type="password", key="reg_pw")
         yeni_pw2 = st.text_input("Şifre (tekrar)", type="password", key="reg_pw2")
         if st.button("Kayıt Ol"):
@@ -269,6 +257,8 @@ if not st.session_state.logged_in:
                 st.error("Ad soyad giriniz.")
             elif not email_valid(yeni_email):
                 st.error("Geçerli bir email giriniz.")
+            elif not yeni_sehir.strip():
+                st.error("Şehir giriniz.")
             elif len(yeni_pw) < 6:
                 st.error("Şifre en az 6 karakter olmalı.")
             elif yeni_pw != yeni_pw2:
@@ -276,7 +266,7 @@ if not st.session_state.logged_in:
             elif get_user_by_email(yeni_email):
                 st.error("Bu email zaten kayıtlı.")
             else:
-                create_user(yeni_email, yeni_ad.strip(), yeni_pw)
+                create_user(yeni_email, yeni_ad.strip(), yeni_pw, yeni_sehir.strip())
                 st.success("Kayıt başarılı! Şimdi 'Giriş Yap' sekmesinden giriş yapabilirsiniz.")
 
 else:
@@ -364,7 +354,7 @@ else:
         with st.chat_message("assistant"):
             try:
                 custom_instructions = get_custom_instructions(user_id) if (package == "Pro" or is_admin) else ""
-                system_prompt = build_system_prompt(custom_instructions)
+                system_prompt = build_system_prompt(custom_instructions, st.session_state.user["sehir"])
                 all_messages = get_messages(active_conv_id)
                 contents = build_gemini_contents(all_messages)
 
